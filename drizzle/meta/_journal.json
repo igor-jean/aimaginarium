@@ -1,0 +1,48 @@
+{
+  "version": "5",
+  "dialect": "pg",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1739619517141,
+      "tag": "0000_lovely_wolfsbane",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1739629038425,
+      "tag": "0001_charming_cobalt_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1739629564123,
+      "tag": "0002_pale_maelstrom",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1739637169853,
+      "tag": "0003_milky_black_widow",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1739638708690,
+      "tag": "0004_hesitant_wither",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1739642019685,
+      "tag": "0005_skinny_energizer",
+      "breakpoints": true
+    }
+  ]
+}

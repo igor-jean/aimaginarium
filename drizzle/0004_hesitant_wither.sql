@@ -1,0 +1,1 @@
+ALTER TABLE "game_participants" ADD CONSTRAINT "game_participants_game_id_user_id_unique" UNIQUE("game_id","user_id");

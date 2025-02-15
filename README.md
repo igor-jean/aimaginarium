@@ -1,36 +1,75 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AImaginarum
 
-## Getting Started
+Un jeu multijoueur créatif basé sur la génération d'images par IA où les joueurs s'affrontent pour reproduire au mieux l'image du maître.
 
-First, run the development server:
+## 🎮 Fonctionnalités
+
+- 🎨 Génération d'images via IA
+- 👥 Système de salons multijoueurs
+- 💬 Chat en temps réel
+- 🏆 Système de scores
+- 🔐 Authentification des utilisateurs
+
+## 🛠 Technologies
+
+- **Frontend & Backend**: Next.js 14
+- **Base de données**: Supabase
+- **ORM**: Drizzle
+- **Temps réel**: Supabase Realtime
+- **Authentification**: Supabase Auth
+- **Génération d'images**: OpenAI API
+- **Styles**: TailwindCSS
+
+## 🚀 Installation
+
+1. Cloner le projet
+
+```bash
+git clone [URL_DU_REPO]
+cd aimaginarium
+```
+
+2. Installer les dépendances
+
+```bash
+npm install
+```
+
+3. Configurer les variables d'environnement
+
+```bash
+cp .env.example .env.local
+```
+
+Remplir les variables suivantes dans `.env.local`:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `OPENAI_API_KEY`
+
+4. Lancer le projet en développement
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 📝 Structure du projet
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```
+src/
+├── app/                 # Routes et pages Next.js
+├── components/          # Composants React réutilisables
+├── lib/                 # Utilitaires et configurations
+│   ├── supabase/       # Configuration Supabase
+│   └── drizzle/        # Schémas et configurations Drizzle
+├── types/              # Types TypeScript
+└── utils/              # Fonctions utilitaires
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 🤝 Contribution
 
-## Learn More
+Les contributions sont les bienvenues ! N'hésitez pas à ouvrir une issue ou une pull request.
 
-To learn more about Next.js, take a look at the following resources:
+## 📜 Licence
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+MIT
