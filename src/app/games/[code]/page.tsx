@@ -5,12 +5,20 @@ import { useParams } from "next/navigation";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { GameChat } from "@/components/games/GameChat";
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { useImageGeneration } from "@/hooks/useImageGeneration";
 
 interface Game {
   id: number;
   name: string;
   code: string;
-  status: "waiting" | "masterPrompt" | "playing" | "finished";
+  status:
+    | "waiting"
+    | "masterWriting"
+    | "generating"
+    | "playersWriting"
+    | "comparing"
+    | "scoring"
+    | "finished";
   currentRound: number;
   totalRounds: number;
   targetScore: number;
@@ -44,11 +52,19 @@ export default function GamePage() {
   const [masterPrompt, setMasterPrompt] = useState("");
   const [playerPrompt, setPlayerPrompt] = useState("");
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
+  const [revealedPrompts, setRevealedPrompts] = useState<
+    { text: string; username: string; id: number }[]
+  >([]);
+  const [winningPromptId, setWinningPromptId] = useState<number | null>(null);
+  const [hasSubmittedPrompt, setHasSubmittedPrompt] = useState(false);
   const params = useParams();
   const { user } = useAuth();
   const supabase = createClientComponentClient();
+  const { generateImage: generateImageApi } = useImageGeneration();
 
-  // Charger les données du jeu et des participants
+  // ===============================================
+  // SECTION 1: GESTION DE L'AJOUT DES PARTICIPANTS
+  // ===============================================
   useEffect(() => {
     const fetchGameData = async () => {
       try {
@@ -78,11 +94,12 @@ export default function GamePage() {
 
         setGame(transformedGame);
 
-        // Charger les participants
+        // Charger les participants existants
         await loadParticipants(transformedGame.id);
 
-        // Rejoindre automatiquement si pas déjà participant
+        // Rejoindre automatiquement la partie si l'utilisateur n'est pas déjà participant
         if (user) {
+          // Vérifier si l'utilisateur est déjà participant
           const { data: existingParticipant, error: existingError } =
             await supabase
               .from("game_participants")
@@ -93,6 +110,7 @@ export default function GamePage() {
 
           if (existingError) throw existingError;
 
+          // Si l'utilisateur n'est pas participant, l'ajouter à la partie
           if (!existingParticipant) {
             const { error: joinError } = await supabase
               .from("game_participants")
@@ -103,14 +121,12 @@ export default function GamePage() {
                 },
               ]);
 
-            // Si l'erreur est une violation de contrainte unique, on l'ignore
-            // car cela signifie que le participant existe déjà
             if (joinError && joinError.code !== "23505") {
               throw joinError;
             }
           }
 
-          // Recharger les participants dans tous les cas
+          // Recharger la liste des participants après l'ajout
           await loadParticipants(transformedGame.id);
         }
       } catch (err) {
@@ -128,6 +144,8 @@ export default function GamePage() {
   }, [params.code, supabase, user]);
 
   const loadParticipants = async (gameId: number) => {
+    console.log("Chargement des participants pour le jeu:", gameId);
+
     const { data, error } = await supabase
       .from("game_participants")
       .select(
@@ -138,28 +156,100 @@ export default function GamePage() {
       )
       .eq("game_id", gameId);
 
-    if (error) throw error;
+    if (error) {
+      console.error("Erreur lors du chargement des participants:", error);
+      throw error;
+    }
 
-    // Transformer les données pour s'assurer que les propriétés sont correctes
     const transformedData = data.map((participant) => ({
       ...participant,
-      userId: participant.user_id, // Ajouter cette ligne pour s'assurer que userId est défini
-      isReady: participant.is_ready, // Ajouter cette ligne pour la cohérence
+      userId: participant.user_id,
+      isReady: participant.is_ready,
       isCurrentMaster: participant.is_current_master,
     }));
 
-    console.log("Participants chargés:", transformedData);
+    console.log("Participants chargés avec succès:", transformedData);
     setParticipants(transformedData);
+    return transformedData;
+  };
+
+  // ================================================
+  // SECTION 2: GESTION DU STATUT PRÊT/PAS PRÊT
+  // ================================================
+  const toggleReady = async () => {
+    if (!game || !user) {
+      console.error("Pas de jeu ou d'utilisateur");
+      return;
+    }
+
+    // Trouver le participant actuel
+    const participant = participants.find((p) => p.userId === user.id);
+    if (!participant) {
+      console.error("Participant non trouvé");
+      return;
+    }
+
+    try {
+      // Mettre à jour le statut prêt/pas prêt du participant
+      const { data, error } = await supabase
+        .from("game_participants")
+        .update({
+          is_ready: !participant.isReady,
+        })
+        .eq("game_id", game.id)
+        .eq("user_id", user.id)
+        .select();
+
+      if (error) throw error;
+
+      // Recharger les participants pour mettre à jour l'interface
+      await loadParticipants(game.id);
+    } catch (err) {
+      console.error("Erreur lors de la mise à jour du statut:", err);
+    }
+  };
+
+  // ================================================
+  // SECTION 3: GESTION DU DÉMARRAGE DE LA PARTIE
+  // ================================================
+  const startGame = async () => {
+    if (!game || !user) return;
+    if (game.creatorId !== user.id) return;
+    if (participants.length < 2) return;
+    if (!participants.every((p) => p.isReady)) return;
+
+    try {
+      // Sélection aléatoire du maître
+      const randomParticipant =
+        participants[Math.floor(Math.random() * participants.length)];
+
+      // Mise à jour du jeu
+      const { error } = await supabase
+        .from("games")
+        .update({
+          status: "masterWriting",
+          master_id: randomParticipant.userId,
+          current_round: 1,
+          round_started_at: new Date().toISOString(),
+          master_prompt: null,
+          master_image_url: null,
+        })
+        .eq("id", game.id)
+        .eq("status", "waiting");
+
+      if (error) throw error;
+    } catch (error) {
+      console.error("Erreur lors du démarrage de la partie:", error);
+    }
   };
 
   // Souscrire aux changements
   useEffect(() => {
     if (!game) return;
 
-    console.log("Configuration de la souscription pour le jeu:", game.id);
-
+    // Créer un seul canal pour toutes les souscriptions
     const channel = supabase
-      .channel(`game-${game.id}`)
+      .channel(`game-${game.id}-realtime`)
       .on(
         "postgres_changes",
         {
@@ -168,51 +258,28 @@ export default function GamePage() {
           table: "games",
           filter: `id=eq.${game.id}`,
         },
-        async (payload) => {
-          console.log("Changement détecté dans la table games:", {
-            eventType: payload.eventType,
-            oldRecord: payload.old,
-            newRecord: payload.new,
-          });
-
-          if (!payload.new) {
-            console.log("Pas de nouvelles données reçues");
-            return;
-          }
-
-          // Recharger les données complètes du jeu
-          const { data: freshGameData, error: gameError } = await supabase
-            .from("games")
-            .select("*")
-            .eq("id", game.id)
-            .single();
-
-          if (gameError) {
-            console.error("Erreur lors du rechargement du jeu:", gameError);
-            return;
-          }
-
-          console.log("Données fraîches du jeu:", freshGameData);
+        async (payload: { new: any }) => {
+          const newGame = payload.new;
+          if (!newGame) return;
 
           // Transformer les données du jeu
           const transformedGame = {
-            ...freshGameData,
-            creatorId: freshGameData.creator_id,
-            masterId: freshGameData.master_id,
-            currentRound: freshGameData.current_round,
-            totalRounds: freshGameData.total_rounds,
-            targetScore: freshGameData.target_score,
-            masterPrompt: freshGameData.master_prompt,
-            masterImageUrl: freshGameData.master_image_url,
-            roundStartedAt: freshGameData.round_started_at,
-            roundEndedAt: freshGameData.round_ended_at,
+            id: newGame.id,
+            name: newGame.name,
+            code: newGame.code,
+            status: newGame.status,
+            creatorId: newGame.creator_id,
+            masterId: newGame.master_id,
+            currentRound: newGame.current_round,
+            totalRounds: newGame.total_rounds,
+            targetScore: newGame.target_score,
+            masterPrompt: newGame.master_prompt,
+            masterImageUrl: newGame.master_image_url,
+            roundStartedAt: newGame.round_started_at,
+            roundEndedAt: newGame.round_ended_at,
           };
 
-          console.log("Mise à jour du state avec:", transformedGame);
           setGame(transformedGame as Game);
-
-          // Recharger aussi les participants
-          await loadParticipants(game.id);
         }
       )
       .on(
@@ -223,143 +290,49 @@ export default function GamePage() {
           table: "game_participants",
           filter: `game_id=eq.${game.id}`,
         },
-        async (payload) => {
-          console.log("Changement détecté dans la table game_participants:", {
-            eventType: payload.eventType,
-            oldRecord: payload.old,
-            newRecord: payload.new,
-          });
-
-          // Recharger les données complètes du jeu et des participants
-          const [gameResponse, participantsResponse] = await Promise.all([
-            supabase.from("games").select("*").eq("id", game.id).single(),
-            loadParticipants(game.id),
-          ]);
-
-          if (gameResponse.error) {
-            console.error(
-              "Erreur lors du rechargement du jeu:",
-              gameResponse.error
-            );
-            return;
-          }
-
-          const freshGameData = gameResponse.data;
-          const transformedGame = {
-            ...freshGameData,
-            creatorId: freshGameData.creator_id,
-            masterId: freshGameData.master_id,
-            currentRound: freshGameData.current_round,
-            totalRounds: freshGameData.total_rounds,
-            targetScore: freshGameData.target_score,
-            masterPrompt: freshGameData.master_prompt,
-            masterImageUrl: freshGameData.master_image_url,
-            roundStartedAt: freshGameData.round_started_at,
-            roundEndedAt: freshGameData.round_ended_at,
-          };
-
-          setGame(transformedGame as Game);
+        async () => {
+          // Recharger uniquement les participants
+          await loadParticipants(game.id);
         }
       );
 
     // S'abonner et gérer les erreurs
-    channel.subscribe(async (status, err) => {
+    channel.subscribe((status) => {
       if (status === "SUBSCRIBED") {
-        console.log("Souscription réussie au canal", `game-${game.id}`);
-        // Forcer un rechargement initial des données
-        const { data: gameData, error: gameError } = await supabase
-          .from("games")
-          .select("*")
-          .eq("id", game.id)
-          .single();
+        // Charger les données initiales une seule fois
+        Promise.all([
+          (async () => {
+            const { data: gameData, error: gameError } = await supabase
+              .from("games")
+              .select("*")
+              .eq("id", game.id)
+              .single();
 
-        if (!gameError && gameData) {
-          console.log("Données initiales du jeu chargées:", gameData);
-          const transformedGame = {
-            ...gameData,
-            creatorId: gameData.creator_id,
-            masterId: gameData.master_id,
-            currentRound: gameData.current_round,
-            totalRounds: gameData.total_rounds,
-            targetScore: gameData.target_score,
-            masterPrompt: gameData.master_prompt,
-            masterImageUrl: gameData.master_image_url,
-            roundStartedAt: gameData.round_started_at,
-            roundEndedAt: gameData.round_ended_at,
-          };
-          setGame(transformedGame);
-          await loadParticipants(game.id);
-        }
-      } else if (status === "CHANNEL_ERROR") {
-        console.error("Erreur de souscription:", err);
-        // Tenter de se reconnecter
-        await channel.unsubscribe();
-        channel.subscribe();
+            if (!gameError && gameData) {
+              const transformedGame = {
+                ...gameData,
+                creatorId: gameData.creator_id,
+                masterId: gameData.master_id,
+                currentRound: gameData.current_round,
+                totalRounds: gameData.total_rounds,
+                targetScore: gameData.target_score,
+                masterPrompt: gameData.master_prompt,
+                masterImageUrl: gameData.master_image_url,
+                roundStartedAt: gameData.round_started_at,
+                roundEndedAt: gameData.round_ended_at,
+              };
+              setGame(transformedGame);
+            }
+          })(),
+          loadParticipants(game.id),
+        ]);
       }
     });
 
     return () => {
-      console.log("Nettoyage de la souscription pour le jeu:", game.id);
       supabase.removeChannel(channel);
     };
   }, [game?.id, supabase]);
-
-  const toggleReady = async () => {
-    if (!game || !user) {
-      console.error("Pas de jeu ou d'utilisateur");
-      return;
-    }
-
-    console.log("Données actuelles:", {
-      participants,
-      userId: user.id,
-      participantsUserIds: participants.map((p) => p.userId),
-    });
-
-    const participant = participants.find((p) => p.userId === user.id);
-    console.log("Recherche participant:", {
-      trouvé: !!participant,
-      participantId: participant?.id,
-      userId: user.id,
-      participantUserId: participant?.userId,
-    });
-
-    if (!participant) {
-      console.error("Participant non trouvé");
-      return;
-    }
-
-    console.log("Tentative de mise à jour:", {
-      gameId: game.id,
-      userId: user.id,
-      participantId: participant.id,
-      currentIsReady: participant.isReady,
-      newIsReady: !participant.isReady,
-    });
-
-    try {
-      const { data, error } = await supabase
-        .from("game_participants")
-        .update({
-          is_ready: !participant.isReady,
-        })
-        .eq("game_id", game.id)
-        .eq("user_id", user.id)
-        .select();
-
-      if (error) {
-        console.error("Erreur lors de la mise à jour du statut:", error);
-        throw error;
-      }
-
-      console.log("Mise à jour réussie:", data);
-
-      // Recharger les participants pour mettre à jour l'interface
-      await loadParticipants(game.id);
-    } catch (err) {
-      console.error("Erreur lors de la mise à jour du statut:", err);
-    }
-  };
 
   const leaveGame = async () => {
     if (!game || !user) return;
@@ -380,122 +353,187 @@ export default function GamePage() {
     }
   };
 
-  // Fonction pour démarrer la partie quand tout le monde est prêt
-  const startGame = async () => {
-    if (!game || !user) {
-      console.error("Impossible de démarrer la partie:", { game, user });
-      return;
+  // Timer pour les phases de jeu
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+
+    if (
+      (game?.status === "masterWriting" && game.masterId === user?.id) ||
+      (game?.status === "playersWriting" && game.masterId !== user?.id)
+    ) {
+      setTimeLeft(30);
+      timer = setInterval(() => {
+        setTimeLeft((prevTime) => {
+          if (prevTime === null) return null;
+          if (prevTime <= 1) {
+            clearInterval(timer);
+            // Si le temps est écoulé
+            if (game.status === "masterWriting" && !game.masterPrompt) {
+              handleTimeUp();
+            } else if (game.status === "playersWriting") {
+              handlePlayersTimeUp();
+            }
+            return 0;
+          }
+          return prevTime - 1;
+        });
+      }, 1000);
     }
 
-    try {
-      console.log("Démarrage de la partie...", {
-        gameId: game.id,
-        participants,
-        allReady: participants.every((p) => p.isReady),
-      });
+    return () => {
+      if (timer) {
+        clearInterval(timer);
+      }
+      // Réinitialiser le timer quand le statut change
+      setTimeLeft(null);
+    };
+  }, [game?.status, game?.masterId, user?.id]);
 
-      // Vérifier que tous les participants sont prêts
-      const allReady = participants.every((p) => p.isReady);
-      if (!allReady) {
-        console.error("Tous les joueurs ne sont pas prêts");
+  const handleTimeUp = async () => {
+    if (!game || !user) return;
+
+    // Sélectionner un nouveau maître aléatoirement
+    const eligibleParticipants = participants.filter(
+      (p) => p.userId !== game.masterId
+    );
+    const newMaster =
+      eligibleParticipants[
+        Math.floor(Math.random() * eligibleParticipants.length)
+      ];
+
+    await supabase
+      .from("games")
+      .update({
+        master_id: newMaster.userId,
+        master_prompt: null,
+        master_image_url: null,
+        round_started_at: new Date().toISOString(),
+      })
+      .eq("id", game.id);
+  };
+
+  // Nouvelle fonction pour gérer la fin du temps des joueurs
+  const handlePlayersTimeUp = async () => {
+    if (!game || !user) return;
+
+    try {
+      // Récupérer la liste des joueurs qui n'ont pas encore répondu
+      const { data: submittedPrompts, error } = await supabase
+        .from("player_prompts")
+        .select("user_id")
+        .eq("game_id", game.id)
+        .eq("round", game.currentRound);
+
+      if (error) {
+        console.error("Erreur lors de la vérification des prompts:", error);
         return;
       }
 
-      // Sélectionner un maître aléatoire
-      const randomParticipant =
-        participants[Math.floor(Math.random() * participants.length)];
+      const nonMasterParticipants = participants.filter(
+        (p) => p.userId !== game.masterId
+      );
 
-      console.log("Maître sélectionné:", {
-        master: randomParticipant,
-        userId: randomParticipant.userId,
+      // Pour chaque joueur qui n'a pas répondu, soumettre "Pas de réponse"
+      for (const player of nonMasterParticipants) {
+        if (
+          !submittedPrompts?.some((prompt) => prompt.user_id === player.userId)
+        ) {
+          await fetch("/api/player-prompts", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              gameId: game.id,
+              userId: player.userId,
+              round: game.currentRound,
+              prompt: "Pas de réponse",
+            }),
+          });
+        }
+      }
+
+      // Passer à la phase de comparaison
+      await startComparisonPhase();
+    } catch (error) {
+      console.error("Erreur lors de la gestion de la fin du temps:", error);
+    }
+  };
+
+  // Fonction pour démarrer la phase de comparaison
+  const startComparisonPhase = async () => {
+    if (!game) return;
+
+    try {
+      // Récupérer tous les prompts des joueurs pour ce round
+      const response = await fetch(
+        `/api/player-prompts?gameId=${game.id}&round=${game.currentRound}`
+      );
+
+      if (!response.ok) {
+        throw new Error("Erreur lors de la récupération des prompts");
+      }
+
+      const allPrompts = await response.json();
+      console.log("Prompts collectés:", allPrompts);
+
+      // Filtrer les prompts pour exclure celui du maître
+      const playerPrompts = allPrompts.filter(
+        (p: any) => p.user_id !== game.masterId
+      );
+
+      if (playerPrompts.length === 0) {
+        throw new Error("Aucun prompt de joueur trouvé");
+      }
+
+      // Comparer les prompts
+      const compareResponse = await fetch("/api/compare-prompts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          masterPrompt: game.masterPrompt,
+          playerPrompts: playerPrompts.map((p: any) => p.prompt),
+        }),
       });
 
-      // Mettre à jour le statut du jeu et le maître
-      console.log("Mise à jour du statut du jeu...");
-      const { data: gameUpdateData, error: updateError } = await supabase
+      if (!compareResponse.ok) {
+        throw new Error("Erreur lors de la comparaison des prompts");
+      }
+
+      const { winnerId } = await compareResponse.json();
+
+      // Mettre à jour le statut du jeu vers la phase de comparaison
+      const { error: updateError } = await supabase
         .from("games")
         .update({
-          status: "masterPrompt",
-          master_id: randomParticipant.userId,
-          current_round: 1,
-          round_started_at: new Date().toISOString(),
-          master_prompt: null,
-          master_image_url: null,
+          status: "comparing",
         })
-        .eq("id", game.id)
-        .select();
+        .eq("id", game.id);
 
-      console.log("Résultat de la mise à jour du jeu:", {
-        data: gameUpdateData,
-        error: updateError,
-        newStatus: "masterPrompt",
-        newMasterId: randomParticipant.userId,
-      });
+      if (updateError) throw updateError;
 
-      if (updateError) {
-        console.error("Erreur lors de la mise à jour du jeu:", updateError);
-        throw updateError;
-      }
+      // Préparer les prompts pour la révélation
+      const promptsToReveal = playerPrompts.map((p: any) => ({
+        id: p.id,
+        text: p.prompt,
+        username: p.user.username,
+      }));
 
-      // Réinitialiser les participants
-      console.log("Réinitialisation des participants...");
-      const { data: resetData, error: resetError } = await supabase
-        .from("game_participants")
-        .update({
-          is_current_master: false,
-          current_prompt: null,
-          image_url: null,
-          similarity: null,
-        })
-        .eq("game_id", game.id)
-        .select();
-
-      console.log("Résultat de la réinitialisation des participants:", {
-        data: resetData,
-        error: resetError,
-      });
-
-      if (resetError) {
-        console.error(
-          "Erreur lors de la réinitialisation des participants:",
-          resetError
-        );
-        throw resetError;
-      }
-
-      // Mettre à jour le statut du maître
-      console.log("Définition du nouveau maître...");
-      const { data: masterData, error: participantError } = await supabase
-        .from("game_participants")
-        .update({ is_current_master: true })
-        .eq("user_id", randomParticipant.userId)
-        .eq("game_id", game.id)
-        .select();
-
-      console.log("Résultat de la mise à jour du maître:", {
-        data: masterData,
-        error: participantError,
-      });
-
-      if (participantError) {
-        console.error(
-          "Erreur lors de la mise à jour du maître:",
-          participantError
-        );
-        throw participantError;
-      }
-
-      // Forcer le rechargement des données
-      console.log("Rechargement des participants...");
-      await loadParticipants(game.id);
-
-      console.log("Partie démarrée avec succès - Statut final:", {
-        gameId: game.id,
-        newStatus: "masterPrompt",
-        masterId: randomParticipant.userId,
-      });
-    } catch (err) {
-      console.error("Erreur détaillée lors du démarrage de la partie:", err);
+      // Déclencher l'animation de révélation
+      await revealPromptsWithAnimation(
+        promptsToReveal,
+        game.masterPrompt || "",
+        participants.find((p) => p.userId === game.masterId)?.user.username ||
+          "",
+        winnerId
+      );
+    } catch (error) {
+      console.error(
+        "Erreur lors du démarrage de la phase de comparaison:",
+        error
+      );
     }
   };
 
@@ -504,13 +542,12 @@ export default function GamePage() {
     if (!game || !user || game.masterId !== user.id) return;
 
     try {
-      // Mettre à jour le prompt du maître et passer au statut playing
       const { error } = await supabase
         .from("games")
         .update({
           master_prompt: prompt,
-          status: "playing",
-          round_started_at: new Date().toISOString(), // Réinitialiser le timer
+          status: "generating",
+          round_started_at: new Date().toISOString(),
         })
         .eq("id", game.id);
 
@@ -519,147 +556,97 @@ export default function GamePage() {
       // Réinitialiser le prompt local
       setMasterPrompt("");
 
-      // TODO: Appeler l'API de génération d'image
-    } catch (err) {
-      console.error("Erreur lors de la soumission du prompt:", err);
+      // Générer l'image (à implémenter)
+      await generateImage(prompt);
+    } catch (error) {
+      console.error("Erreur lors de la soumission du prompt:", error);
     }
   };
 
-  // Fonction pour soumettre le prompt d'un joueur
-  const submitPlayerPrompt = async (prompt: string) => {
-    if (!game || !user || game.masterId === user.id) return;
-
-    try {
-      const { error } = await supabase
-        .from("game_participants")
-        .update({
-          current_prompt: prompt,
-        })
-        .eq("game_id", game.id)
-        .eq("user_id", user.id);
-
-      if (error) throw error;
-    } catch (err) {
-      console.error("Erreur lors de la soumission du prompt:", err);
-    }
-  };
-
-  // Fonction pour calculer la similarité et mettre à jour les scores
-  const calculateSimilarityAndUpdateScores = async () => {
-    if (!game || !game.masterPrompt) return;
-
-    try {
-      // Pour chaque participant (sauf le maître)
-      for (const participant of participants.filter(
-        (p) => !p.isCurrentMaster
-      )) {
-        if (!participant.currentPrompt) continue;
-
-        // TODO: Appeler l'API de calcul de similarité
-        const similarity = 0; // À remplacer par l'appel API
-
-        // Mettre à jour la similarité
-        const { error } = await supabase
-          .from("game_participants")
-          .update({
-            similarity,
-            score: participant.score + (similarity >= 80 ? 1 : 0), // Seuil de similarité à 80%
-          })
-          .eq("game_id", game.id)
-          .eq("user_id", participant.userId);
-
-        if (error) throw error;
-      }
-
-      // Si personne n'a trouvé, le maître gagne un point
-      const anyoneFound = participants.some(
-        (p) => !p.isCurrentMaster && (p.similarity ?? 0) >= 80
-      );
-      if (!anyoneFound) {
-        const { error } = await supabase
-          .from("game_participants")
-          .update({
-            score: participants.find((p) => p.isCurrentMaster)!.score + 1,
-          })
-          .eq("game_id", game.id)
-          .eq("user_id", game.masterId);
-
-        if (error) throw error;
-      }
-    } catch (err) {
-      console.error("Erreur lors du calcul des scores:", err);
-    }
-  };
-
-  // Fonction pour passer au tour suivant
-  const nextRound = async () => {
+  // Fonction pour générer l'image
+  const generateImage = async (prompt: string) => {
     if (!game) return;
 
     try {
-      // Vérifier si la partie est terminée
-      const maxScore = Math.max(...participants.map((p) => p.score));
-      if (
-        maxScore >= game.targetScore ||
-        game.currentRound >= game.totalRounds
-      ) {
-        // Terminer la partie
-        const { error } = await supabase
-          .from("games")
-          .update({
-            status: "finished",
-            ended_at: new Date().toISOString(),
-          })
-          .eq("id", game.id);
+      // Appeler l'API de génération d'image
+      const imageUrl = await generateImageApi(prompt);
 
-        if (error) throw error;
-        return;
-      }
-
-      // Sélectionner un nouveau maître (le joueur avec la meilleure similarité)
-      const nextMaster = participants
-        .filter((p) => !p.isCurrentMaster)
-        .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))[0];
-
-      // Mettre à jour le jeu
-      const { error: gameError } = await supabase
+      // Une fois l'image générée, mettre à jour le jeu avec l'URL de l'image
+      const { error } = await supabase
         .from("games")
         .update({
-          current_round: game.currentRound + 1,
-          master_id: nextMaster.userId,
-          master_prompt: null,
-          master_image_url: null,
+          status: "playersWriting",
+          master_image_url: imageUrl,
           round_started_at: new Date().toISOString(),
-          round_ended_at: null,
         })
         .eq("id", game.id);
 
-      if (gameError) throw gameError;
+      if (error) throw error;
+    } catch (error) {
+      console.error("Erreur lors de la génération de l'image:", error);
+    }
+  };
 
-      // Mettre à jour les participants
-      const { error: participantError } = await supabase
-        .from("game_participants")
-        .update({
-          is_current_master: false,
-          current_prompt: null,
-          image_url: null,
-          similarity: null,
-        })
-        .eq("game_id", game.id);
+  // Fonction pour vérifier si tous les joueurs ont répondu
+  const checkAllPlayersSubmitted = async () => {
+    if (!game) return false;
 
-      if (participantError) throw participantError;
+    const { data: submittedPrompts, error } = await supabase
+      .from("player_prompts")
+      .select("user_id")
+      .eq("game_id", game.id)
+      .eq("round", game.currentRound);
 
-      // Définir le nouveau maître
-      const { error: newMasterError } = await supabase
-        .from("game_participants")
-        .update({
-          is_current_master: true,
-        })
-        .eq("game_id", game.id)
-        .eq("user_id", nextMaster.userId);
+    if (error) {
+      console.error("Erreur lors de la vérification des prompts:", error);
+      return false;
+    }
 
-      if (newMasterError) throw newMasterError;
-    } catch (err) {
-      console.error("Erreur lors du passage au tour suivant:", err);
+    const nonMasterParticipants = participants.filter(
+      (p) => p.userId !== game.masterId
+    );
+
+    const allSubmitted = nonMasterParticipants.every((participant) =>
+      submittedPrompts?.some((prompt) => prompt.user_id === participant.userId)
+    );
+
+    if (allSubmitted) {
+      await startComparisonPhase();
+    }
+
+    return allSubmitted;
+  };
+
+  // Modifier la fonction submitPlayerPrompt
+  const submitPlayerPrompt = async (prompt: string) => {
+    if (!game || !user) return;
+
+    try {
+      // Sauvegarder le prompt dans la nouvelle table playerPrompts
+      const response = await fetch("/api/player-prompts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          gameId: game.id,
+          userId: user.id,
+          round: game.currentRound,
+          prompt: prompt,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Erreur lors de la sauvegarde du prompt");
+      }
+
+      setHasSubmittedPrompt(true);
+      setPlayerPrompt("");
+
+      // Vérifier si tous les joueurs ont soumis leur prompt
+      await checkAllPlayersSubmitted();
+    } catch (error) {
+      console.error("Erreur lors de la soumission du prompt:", error);
     }
   };
 
@@ -667,87 +654,6 @@ export default function GamePage() {
   const currentParticipant = user
     ? participants.find((p) => p.userId === user.id)
     : null;
-
-  // Timer pour les phases de jeu
-  useEffect(() => {
-    if (!game || !game.roundStartedAt) return;
-    if (game.roundEndedAt) return;
-
-    // Si le round est terminé, on ne fait rien
-    if (game.roundEndedAt) return;
-
-    // Calculer le temps restant
-    const startTime = new Date(game.roundStartedAt).getTime();
-    const timeLimit = 30 * 1000; // 30 secondes
-    const now = Date.now();
-    const elapsed = now - startTime;
-    const remaining = Math.max(0, timeLimit - elapsed);
-
-    // Si le temps est écoulé
-    if (remaining === 0) {
-      if (game.status === "masterPrompt") {
-        // Si on est le maître et qu'on n'a pas de prompt, on en met un par défaut
-        if (game.masterId === user?.id && !game.masterPrompt) {
-          submitMasterPrompt("Le maître n'a pas soumis de prompt à temps");
-        }
-      } else if (game.status === "playing") {
-        // Si on est le maître et qu'on n'a pas de prompt, on en met un par défaut
-        if (game.masterId === user?.id && !game.masterPrompt) {
-          submitMasterPrompt("Le maître n'a pas soumis de prompt à temps");
-        }
-        // Si on est joueur et qu'on n'a pas soumis de prompt, on en met un par défaut
-        else if (
-          game.masterId !== user?.id &&
-          !currentParticipant?.currentPrompt
-        ) {
-          submitPlayerPrompt("Le joueur n'a pas soumis de prompt à temps");
-        }
-      }
-      return;
-    }
-
-    // Mettre à jour le timer
-    setTimeLeft(Math.ceil(remaining / 1000));
-
-    // Mettre à jour toutes les secondes
-    const timer = setInterval(() => {
-      const now = Date.now();
-      const elapsed = now - startTime;
-      const remaining = Math.max(0, timeLimit - elapsed);
-      setTimeLeft(Math.ceil(remaining / 1000));
-
-      // Si le temps est écoulé
-      if (remaining === 0) {
-        clearInterval(timer);
-        if (game.status === "masterPrompt") {
-          if (game.masterId === user?.id && !game.masterPrompt) {
-            submitMasterPrompt("Le maître n'a pas soumis de prompt à temps");
-          }
-        } else if (game.status === "playing") {
-          if (game.masterId === user?.id && !game.masterPrompt) {
-            submitMasterPrompt("Le maître n'a pas soumis de prompt à temps");
-          } else if (
-            game.masterId !== user?.id &&
-            !currentParticipant?.currentPrompt
-          ) {
-            submitPlayerPrompt("Le joueur n'a pas soumis de prompt à temps");
-          }
-        }
-      }
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [
-    game?.status,
-    game?.roundStartedAt,
-    game?.roundEndedAt,
-    game?.masterId,
-    game?.masterPrompt,
-    user?.id,
-    currentParticipant?.currentPrompt,
-    submitMasterPrompt,
-    submitPlayerPrompt,
-  ]);
 
   // Mettre à jour les prompts dans l'interface
   const handleMasterPromptChange = (
@@ -772,6 +678,271 @@ export default function GamePage() {
     submitPlayerPrompt(playerPrompt.trim());
   };
 
+  // Remplacer le code de débogage dans le rendu par une version plus simple
+  const canStartGame =
+    user &&
+    game?.creatorId === user.id &&
+    participants.length >= 2 &&
+    participants.every((p) => p.isReady);
+
+  // Animation de révélation des prompts
+  const revealPromptsWithAnimation = async (
+    prompts: { id: number; text: string; username: string }[],
+    masterPrompt: string,
+    masterUsername: string,
+    winningPromptId?: number | null
+  ) => {
+    // Réinitialiser l'état
+    setRevealedPrompts([]);
+    setWinningPromptId(null);
+
+    try {
+      // Révéler les prompts des joueurs un par un
+      for (const prompt of prompts) {
+        setRevealedPrompts((prev) => [...prev, prompt]);
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+
+      // Définir le gagnant
+      if (typeof winningPromptId === "number") {
+        setWinningPromptId(winningPromptId);
+      }
+
+      // Révéler le prompt maître après un délai
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      setRevealedPrompts((prev) => [
+        ...prev,
+        { text: masterPrompt, username: `${masterUsername} (Maître)`, id: -1 },
+      ]);
+    } catch (error) {
+      console.error("Erreur lors de l'animation des prompts:", error);
+    }
+  };
+
+  // Rendu conditionnel en fonction du statut du jeu
+  const renderGamePhase = () => {
+    if (!game || !user) return null;
+
+    const currentParticipant = participants.find((p) => p.userId === user.id);
+    const isMaster = game.masterId === user.id;
+    const canStartGame =
+      game.creatorId === user.id &&
+      participants.length >= 2 &&
+      participants.every((p) => p.isReady);
+
+    switch (game.status) {
+      case "waiting":
+        return (
+          <div className="text-center">
+            <h2 className="text-2xl mb-4">En attente des joueurs</h2>
+            {canStartGame && (
+              <button
+                onClick={startGame}
+                className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+              >
+                Démarrer la partie
+              </button>
+            )}
+            {!canStartGame && game.creatorId === user.id && (
+              <p className="text-gray-400 mt-2">
+                En attente que tous les joueurs soient prêts...
+              </p>
+            )}
+          </div>
+        );
+
+      case "masterWriting":
+        return (
+          <div className="text-center">
+            <div className="mb-4">
+              {isMaster ? (
+                <>
+                  <h2 className="text-2xl mb-2">
+                    👑 Vous êtes le Maître de la Création 👑
+                  </h2>
+                  <p className="text-xl mb-4">
+                    Temps restant: {timeLeft} secondes
+                  </p>
+                  <textarea
+                    value={masterPrompt}
+                    onChange={handleMasterPromptChange}
+                    className="w-full p-2 rounded mb-2 bg-gray-700 text-white border border-gray-600 focus:border-purple-500 focus:ring-1 focus:ring-purple-500"
+                    placeholder="Écrivez votre prompt ici..."
+                    disabled={timeLeft === 0}
+                  />
+                  <button
+                    onClick={handleMasterPromptSubmit}
+                    className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
+                    disabled={!masterPrompt.trim() || timeLeft === 0}
+                  >
+                    Soumettre le prompt
+                  </button>
+                </>
+              ) : (
+                <>
+                  <h2 className="text-2xl mb-2">
+                    👑{" "}
+                    {
+                      participants.find((p) => p.userId === game.masterId)?.user
+                        .username
+                    }{" "}
+                    est le Maître de la Création 👑
+                  </h2>
+                  <p>En attente du prompt... ({timeLeft} secondes)</p>
+                </>
+              )}
+            </div>
+          </div>
+        );
+
+      case "generating":
+        return (
+          <div className="text-center">
+            <h2 className="text-2xl mb-4">Génération de l'image en cours...</h2>
+            <div className="animate-pulse flex space-x-4 justify-center">
+              <div className="rounded-full bg-slate-700 h-10 w-10"></div>
+              <div className="rounded-full bg-slate-700 h-10 w-10"></div>
+              <div className="rounded-full bg-slate-700 h-10 w-10"></div>
+            </div>
+          </div>
+        );
+
+      case "playersWriting":
+        return (
+          <div className="text-center">
+            <div className="mb-8">
+              <h2 className="text-2xl mb-4">Devinez le prompt !</h2>
+              {game.masterImageUrl && (
+                <div className="max-w-lg mx-auto mb-4">
+                  <img
+                    src={game.masterImageUrl}
+                    alt="Image générée"
+                    className="w-full rounded-lg shadow-lg"
+                  />
+                </div>
+              )}
+              {!isMaster && (
+                <>
+                  {!hasSubmittedPrompt ? (
+                    <div className="max-w-lg mx-auto">
+                      <p className="text-xl mb-4">
+                        Temps restant: {timeLeft || 30} secondes
+                      </p>
+                      <textarea
+                        value={playerPrompt}
+                        onChange={handlePlayerPromptChange}
+                        className="w-full p-2 rounded mb-2 bg-gray-700 text-white border border-gray-600 focus:border-purple-500 focus:ring-1 focus:ring-purple-500"
+                        placeholder="Quel était le prompt selon vous ?"
+                        disabled={timeLeft === 0}
+                      />
+                      <button
+                        onClick={handlePlayerPromptSubmit}
+                        className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
+                        disabled={!playerPrompt.trim() || timeLeft === 0}
+                      >
+                        Soumettre votre réponse
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="text-green-500 font-bold text-xl">
+                      Votre réponse a été enregistrée !
+                      <p className="text-gray-400 mt-2 text-base">
+                        En attente des autres joueurs...
+                      </p>
+                    </div>
+                  )}
+                </>
+              )}
+              {isMaster && (
+                <div className="text-xl text-purple-500">
+                  Les autres joueurs essaient de deviner votre prompt...
+                </div>
+              )}
+            </div>
+          </div>
+        );
+
+      case "comparing":
+        return (
+          <div className="text-center">
+            <h2 className="text-2xl mb-8">
+              {isMaster ? "Résultats des joueurs" : "Comparaison des prompts"}
+            </h2>
+            <div className="space-y-4 max-w-2xl mx-auto">
+              {game.masterImageUrl && (
+                <div className="mb-6">
+                  <img
+                    src={game.masterImageUrl}
+                    alt="Image générée"
+                    className="w-1/2 mx-auto rounded-lg shadow-lg"
+                  />
+                </div>
+              )}
+
+              {/* Prompts révélés */}
+              <div className="space-y-3">
+                {revealedPrompts.map((prompt) => {
+                  const isMasterPrompt = prompt.id === -1;
+                  const isWinningPrompt = prompt.id === winningPromptId;
+
+                  return (
+                    <div
+                      key={prompt.id}
+                      className={`p-4 rounded-lg transition-all duration-300 ${
+                        isMasterPrompt
+                          ? "bg-yellow-500 text-black" // Prompt maître en doré
+                          : isWinningPrompt
+                          ? "bg-green-600 text-white" // Prompt gagnant en vert avec texte blanc
+                          : "bg-gray-700 text-white" // Autres prompts en gris avec texte blanc
+                      }`}
+                    >
+                      <div className="flex justify-between items-center">
+                        <span
+                          className={`${isMasterPrompt ? "font-bold" : ""}`}
+                        >
+                          {prompt.text}
+                        </span>
+                        <span
+                          className={`text-sm ${
+                            isMasterPrompt
+                              ? "text-black font-bold"
+                              : "text-gray-300"
+                          }`}
+                        >
+                          {isMasterPrompt ? "👑 " : ""}
+                          {prompt.username}
+                          {isWinningPrompt && " 🏆"}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+
+      case "scoring":
+        return (
+          <div className="h-full flex flex-col items-center justify-center">
+            <h2 className="text-2xl font-semibold mb-4">
+              Mise à jour des scores...
+            </h2>
+          </div>
+        );
+
+      case "finished":
+        return (
+          <div className="h-full flex flex-col items-center justify-center">
+            <h2 className="text-2xl font-semibold mb-4">Partie terminée !</h2>
+          </div>
+        );
+
+      default:
+        return null;
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
@@ -790,13 +961,6 @@ export default function GamePage() {
     );
   }
 
-  console.log("Debug:", {
-    user: user?.id,
-    participants: participants.map((p) => ({ id: p.id, userId: p.userId })),
-    currentParticipant: currentParticipant?.id,
-    gameStatus: game?.status,
-  });
-
   return (
     <div className="min-h-screen bg-gray-900 text-white">
       <div className="h-screen flex">
@@ -814,7 +978,7 @@ export default function GamePage() {
                 <div className="flex items-center gap-2">
                   <span className="font-medium">
                     {participant.user.username}
-                    {participant.isCurrentMaster && " 👑"}
+                    {game.masterId === participant.userId && " 👑"}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -878,258 +1042,7 @@ export default function GamePage() {
           </div>
 
           <div className="bg-gray-800 rounded-lg p-6 h-[calc(100%-6rem)]">
-            {game.status === "waiting" && (
-              <div className="h-full flex flex-col items-center justify-center">
-                <h2 className="text-2xl font-semibold mb-4">
-                  En attente des joueurs
-                </h2>
-                <div className="text-gray-400 mb-8">
-                  {participants.filter((p) => p.isReady).length}/
-                  {participants.length} joueurs prêts
-                </div>
-                {(() => {
-                  const debugInfo = {
-                    user: user?.id,
-                    creatorId: game.creatorId,
-                    isCreator: game.creatorId === user?.id,
-                    allReady: participants.every((p) => p.isReady),
-                    participants: participants.map((p) => ({
-                      id: p.id,
-                      userId: p.userId,
-                      isReady: p.isReady,
-                    })),
-                  };
-                  console.log("Debug bouton démarrer:", debugInfo);
-                  return null;
-                })()}
-                {user &&
-                  participants.every((p) => p.isReady) &&
-                  game.creatorId === user.id && (
-                    <button
-                      onClick={startGame}
-                      className="px-6 py-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold"
-                    >
-                      Démarrer la partie
-                    </button>
-                  )}
-              </div>
-            )}
-
-            {game.status === "masterPrompt" && (
-              <div className="h-full flex flex-col items-center justify-center">
-                {game.masterId === user?.id ? (
-                  <>
-                    <h2 className="text-2xl font-semibold mb-4">
-                      Vous êtes le maître de la création !
-                    </h2>
-                    <p className="text-gray-400 mb-2">
-                      Écrivez un prompt qui servira à générer une image
-                    </p>
-                    {timeLeft !== null && (
-                      <div className="text-xl font-bold mb-6">
-                        Temps restant : {timeLeft}s
-                      </div>
-                    )}
-                    <div className="w-full max-w-lg space-y-4">
-                      <textarea
-                        className="w-full h-32 p-3 rounded-lg bg-gray-700 text-white resize-none"
-                        placeholder="Décrivez l'image que vous voulez générer..."
-                        value={masterPrompt}
-                        onChange={handleMasterPromptChange}
-                      />
-                      <button
-                        onClick={handleMasterPromptSubmit}
-                        disabled={!masterPrompt.trim()}
-                        className="w-full px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed"
-                      >
-                        Valider le prompt
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <h2 className="text-2xl font-semibold mb-4">
-                      En attente du maître de la création
-                    </h2>
-                    <p className="text-gray-400 mb-4">
-                      Le maître imagine et décrit l'image à créer...
-                    </p>
-                    {timeLeft !== null && (
-                      <div className="text-xl font-bold">
-                        Temps restant : {timeLeft}s
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
-
-            {game.status === "playing" && (
-              <div className="h-full flex flex-col">
-                {/* Phase du maître */}
-                {game.masterId === user?.id && !game.masterPrompt && (
-                  <div className="flex-1 flex flex-col items-center justify-center">
-                    <h2 className="text-2xl font-semibold mb-4">
-                      Vous êtes le maître !
-                    </h2>
-                    <p className="text-gray-400 mb-2">
-                      Écrivez un prompt qui servira à générer une image
-                    </p>
-                    {timeLeft !== null && (
-                      <div className="text-xl font-bold mb-6">
-                        Temps restant : {timeLeft}s
-                      </div>
-                    )}
-                    <div className="w-full max-w-lg space-y-4">
-                      <textarea
-                        className="w-full h-32 p-3 rounded-lg bg-gray-700 text-white resize-none"
-                        placeholder="Décrivez l'image que vous voulez générer..."
-                        value={masterPrompt}
-                        onChange={handleMasterPromptChange}
-                      />
-                      <button
-                        onClick={handleMasterPromptSubmit}
-                        disabled={!masterPrompt.trim()}
-                        className="w-full px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed"
-                      >
-                        Valider le prompt
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Affichage de l'image générée */}
-                {game.masterImageUrl && (
-                  <div className="flex-1 flex flex-col items-center justify-center">
-                    <div className="relative w-full max-w-2xl aspect-square mb-6">
-                      <img
-                        src={game.masterImageUrl}
-                        alt="Image générée"
-                        className="absolute inset-0 w-full h-full object-cover rounded-lg"
-                      />
-                    </div>
-
-                    {/* Phase de réponse des joueurs */}
-                    {game.masterId !== user?.id &&
-                      !currentParticipant?.currentPrompt && (
-                        <div className="w-full max-w-lg">
-                          <p className="text-gray-400 mb-2">
-                            Devinez le prompt qui a généré cette image
-                          </p>
-                          {timeLeft !== null && (
-                            <div className="text-xl font-bold mb-4">
-                              Temps restant : {timeLeft}s
-                            </div>
-                          )}
-                          <div className="space-y-4">
-                            <textarea
-                              className="w-full h-32 p-3 rounded-lg bg-gray-700 text-white resize-none"
-                              placeholder="Écrivez votre proposition..."
-                              value={playerPrompt}
-                              onChange={handlePlayerPromptChange}
-                            />
-                            <button
-                              onClick={handlePlayerPromptSubmit}
-                              disabled={!playerPrompt.trim()}
-                              className="w-full px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed"
-                            >
-                              Valider le prompt
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                    {/* Phase d'attente */}
-                    {currentParticipant?.currentPrompt && (
-                      <div className="text-gray-400">
-                        En attente des autres joueurs...
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Phase de comparaison */}
-                {game.roundEndedAt && (
-                  <div className="flex-1 flex flex-col items-center justify-center">
-                    <h2 className="text-2xl font-semibold mb-6">
-                      Résultats du tour
-                    </h2>
-
-                    <div className="w-full max-w-2xl space-y-4 mb-8">
-                      <div className="p-4 rounded-lg bg-blue-900">
-                        <div className="font-semibold mb-2">
-                          Prompt original :
-                        </div>
-                        <div className="text-gray-300">{game.masterPrompt}</div>
-                      </div>
-
-                      {participants
-                        .filter((p) => !p.isCurrentMaster && p.currentPrompt)
-                        .map((p) => (
-                          <div
-                            key={p.id}
-                            className={`p-4 rounded-lg ${
-                              (p.similarity || 0) >= 80
-                                ? "bg-green-900"
-                                : "bg-gray-700"
-                            }`}
-                          >
-                            <div className="flex justify-between items-center mb-2">
-                              <div className="font-semibold">
-                                {p.user.username}
-                              </div>
-                              <div className="text-sm">
-                                Similarité : {p.similarity || 0}%
-                              </div>
-                            </div>
-                            <div className="text-gray-300">
-                              {p.currentPrompt}
-                            </div>
-                          </div>
-                        ))}
-                    </div>
-
-                    {user?.id === game.masterId && (
-                      <button
-                        onClick={nextRound}
-                        className="px-6 py-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold"
-                      >
-                        Tour suivant
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {game.status === "finished" && (
-              <div className="h-full flex flex-col items-center justify-center">
-                <h2 className="text-2xl font-semibold mb-6">
-                  Partie terminée !
-                </h2>
-
-                <div className="w-full max-w-lg space-y-4 mb-8">
-                  {participants
-                    .sort((a, b) => b.score - a.score)
-                    .map((p, index) => (
-                      <div
-                        key={p.id}
-                        className={`p-4 rounded-lg ${
-                          index === 0 ? "bg-yellow-900" : "bg-gray-700"
-                        }`}
-                      >
-                        <div className="flex justify-between items-center">
-                          <div className="font-semibold">
-                            {index + 1}. {p.user.username}
-                            {index === 0 && " 👑"}
-                          </div>
-                          <div>{p.score} points</div>
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              </div>
-            )}
+            {renderGamePhase()}
           </div>
         </div>
 

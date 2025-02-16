@@ -23,7 +23,18 @@ export const games = pgTable("games", {
   name: text("name").notNull(),
   code: varchar("code", { length: 8 }).notNull().unique(),
   isPublic: boolean("is_public").notNull().default(true),
-  status: text("status").notNull().default("waiting"), // waiting, playing, finished
+  status: varchar("status", { length: 20 })
+    .notNull()
+    .default("waiting")
+    .$type<
+      | "waiting"
+      | "masterWriting"
+      | "generating"
+      | "playersWriting"
+      | "comparing"
+      | "scoring"
+      | "finished"
+    >(),
   currentRound: integer("current_round").default(0),
   totalRounds: integer("total_rounds").default(5),
   targetScore: integer("target_score").default(5),
@@ -67,3 +78,21 @@ export const messages = pgTable("messages", {
   content: text("content").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
 });
+
+export const playerPrompts = pgTable(
+  "player_prompts",
+  {
+    id: serial("id").primaryKey(),
+    gameId: integer("game_id").references(() => games.id),
+    userId: uuid("user_id").references(() => users.id),
+    round: integer("round").notNull(),
+    prompt: text("prompt").notNull(),
+    similarity: integer("similarity"),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => {
+    return {
+      uniqueRoundPrompt: unique().on(table.gameId, table.userId, table.round),
+    };
+  }
+);
